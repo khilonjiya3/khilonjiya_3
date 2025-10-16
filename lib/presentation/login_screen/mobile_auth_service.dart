@@ -21,7 +21,7 @@ class SupabaseService {
   }
 }
 
-/// Authentication service for mobile OTP with real JWT tokens
+/// Production-ready authentication service with 2Factor OTP
 class MobileAuthService {
   static final MobileAuthService _instance = MobileAuthService._internal();
   factory MobileAuthService() => _instance;
@@ -50,10 +50,7 @@ class MobileAuthService {
 
         // Create session object from stored data
         final user = User.fromJson(sessionData['user']);
-        if (user == null) {
-          throw Exception('Failed to parse user data from stored session');
-        }
-        
+
         _session = Session(
           accessToken: sessionData['access_token'],
           refreshToken: sessionData['refresh_token'],
@@ -63,7 +60,7 @@ class MobileAuthService {
         );
         _currentUser = userData;
 
-        // CRITICAL: Set the session in Supabase client using the recoverSession method
+        // Set the session in Supabase client
         try {
           final sessionString = jsonEncode({
             'access_token': _session!.accessToken,
@@ -77,13 +74,11 @@ class MobileAuthService {
           await SupabaseService().client.auth.recoverSession(sessionString);
           debugPrint('✅ Successfully restored Supabase session');
           debugPrint('Current user ID: ${SupabaseService().client.auth.currentUser?.id}');
-          
-          // Verify the session is still valid by making a test call
+
+          // Verify the session is still valid
           await _verifySessionValidity();
-          
         } catch (e) {
           debugPrint('❌ Failed to restore Supabase session: $e');
-          // Try to refresh the session
           final refreshed = await refreshSession();
           if (!refreshed) {
             debugPrint('Session refresh failed, clearing invalid session');
@@ -102,28 +97,27 @@ class MobileAuthService {
     debugPrint('=== AUTH INITIALIZATION COMPLETE ===');
   }
 
-  /// Verify if the current session is valid by making a test API call
+  /// Verify if the current session is valid
   Future<bool> _verifySessionValidity() async {
     try {
-      // Test the session by making a simple authenticated call
       final response = await SupabaseService().client
           .from('user_profiles')
           .select('id')
           .eq('id', _currentUser?['id'])
           .maybeSingle();
-      
-      debugPrint('Session validation successful');
+
+      debugPrint('✅ Session validation successful');
       return true;
     } catch (e) {
-      debugPrint('Session validation failed: $e');
+      debugPrint('❌ Session validation failed: $e');
       return false;
     }
   }
 
-  /// Store Supabase session locally with enhanced data
+  /// Store Supabase session locally
   Future<void> _storeSession(Map<String, dynamic> authResponse) async {
     final prefs = await SharedPreferences.getInstance();
-    
+
     // Store session data
     final sessionData = {
       'access_token': authResponse['accessToken'],
@@ -133,7 +127,7 @@ class MobileAuthService {
       'token_type': authResponse['tokenType'] ?? 'bearer',
       'user': {
         'id': authResponse['auth_user_id'],
-        'email': authResponse['user']['email'] ?? 'user${authResponse['user']['mobile_number']?.replaceAll(RegExp(r'\D'), '')}@temp.khilonjiya.com',
+        'email': authResponse['user']['email'],
         'phone': authResponse['user']['mobile_number'],
         'user_metadata': {
           'mobile_number': authResponse['user']['mobile_number'],
@@ -152,10 +146,7 @@ class MobileAuthService {
 
     // Create Session object
     final user = User.fromJson(sessionData['user']);
-    if (user == null) {
-      throw MobileAuthException('Failed to parse user data from auth response');
-    }
-    
+
     _session = Session(
       accessToken: authResponse['accessToken'],
       refreshToken: authResponse['refreshToken'],
@@ -173,27 +164,27 @@ class MobileAuthService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_sessionKey);
     await prefs.remove(_userKey);
-    
+
     _session = null;
     _currentUser = null;
-    
+
     try {
       await SupabaseService().client.auth.signOut();
     } catch (e) {
       debugPrint('Error during signOut: $e');
     }
-    
+
     debugPrint('🗑️ Cleared all session data');
   }
 
-  /// Send OTP (always returns 123456 in dev)
+  /// Send OTP via 2Factor API (Production)
   Future<OtpResponse> sendOtp(String mobileNumber) async {
     try {
       final phoneNumber = '+91${mobileNumber.replaceAll(RegExp(r'[^\d]'), '')}';
-      debugPrint('Sending OTP to: $phoneNumber');
-      
+      debugPrint('📱 Sending OTP to: $phoneNumber');
+
       final response = await SupabaseService().client.functions.invoke(
-        'smart-function',
+        'mobile-auth',
         body: {
           'action': 'request-otp',
           'mobile_number': phoneNumber,
@@ -201,33 +192,40 @@ class MobileAuthService {
         },
       );
 
-      debugPrint('OTP Response Status: ${response.status}');
-      debugPrint('OTP Response Data: ${response.data}');
+      debugPrint('Response Status: ${response.status}');
+      debugPrint('Response Data: ${response.data}');
 
       if (response.status == 200 &&
           response.data is Map &&
           response.data['success'] == true) {
         return OtpResponse(
           success: true,
-          message: response.data['message'] ?? 'OTP sent',
-          otpForTesting: '123456', // Fixed OTP for development
+          message: response.data['message'] ?? 'OTP sent successfully',
+          sessionId: response.data['sessionId'],
         );
       }
-      throw MobileAuthException('Failed to send OTP: ${response.data}');
+
+      // Handle error response
+      final errorMessage = response.data is Map 
+          ? response.data['message'] ?? 'Failed to send OTP'
+          : 'Failed to send OTP';
+      
+      throw MobileAuthException(errorMessage);
     } catch (e) {
       debugPrint('❌ Send OTP Error: $e');
-      throw MobileAuthException('Network error during OTP send');
+      if (e is MobileAuthException) rethrow;
+      throw MobileAuthException('Network error. Please check your connection.');
     }
   }
 
-  /// Verify OTP and log user in with real JWT tokens
+  /// Verify OTP via 2Factor API (Production)
   Future<AuthResponse> verifyOtp(String mobileNumber, String otp) async {
     try {
       final phoneNumber = '+91${mobileNumber.replaceAll(RegExp(r'[^\d]'), '')}';
-      debugPrint('Verifying OTP for: $phoneNumber with code: $otp');
-      
+      debugPrint('🔐 Verifying OTP for: $phoneNumber');
+
       final response = await SupabaseService().client.functions.invoke(
-        'smart-function',
+        'mobile-auth',
         body: {
           'action': 'verify-otp',
           'mobile_number': phoneNumber,
@@ -242,18 +240,17 @@ class MobileAuthService {
       if (response.status == 200 &&
           response.data is Map &&
           response.data['success'] == true) {
-        
         final data = response.data;
-        
+
         // Validate that we received real tokens
         if (data['accessToken'] == null || data['refreshToken'] == null) {
-          throw MobileAuthException('Invalid response: missing tokens');
+          throw MobileAuthException('Invalid response: missing authentication tokens');
         }
 
         // Store the session with real tokens
         await _storeSession(data);
 
-        // CRITICAL: Set the session in Supabase client immediately
+        // Set the session in Supabase client immediately
         try {
           final sessionString = jsonEncode({
             'access_token': data['accessToken'],
@@ -266,13 +263,10 @@ class MobileAuthService {
 
           await SupabaseService().client.auth.recoverSession(sessionString);
           debugPrint('✅ Successfully set Supabase session after login');
-          
         } catch (e) {
           debugPrint('⚠️ Warning: Could not set Supabase session: $e');
-          // Don't fail the login, but log the issue
         }
 
-        // Debug auth state after login
         debugAuthState();
 
         return AuthResponse(
@@ -282,14 +276,20 @@ class MobileAuthService {
         );
       }
 
-      throw MobileAuthException('Invalid OTP or login failed: ${response.data}');
+      // Handle error response
+      final errorMessage = response.data is Map 
+          ? response.data['message'] ?? 'Invalid OTP'
+          : 'Invalid OTP';
+      
+      throw MobileAuthException(errorMessage);
     } catch (e) {
       debugPrint('❌ Verify OTP Error: $e');
-      throw MobileAuthException('Verification failed: ${e.toString()}');
+      if (e is MobileAuthException) rethrow;
+      throw MobileAuthException('Verification failed. Please try again.');
     }
   }
 
-  /// Refresh session using both custom and Supabase refresh
+  /// Refresh session using edge function
   Future<bool> refreshSession() async {
     if (_session == null || _session!.refreshToken?.isEmpty == true) {
       debugPrint('No session to refresh');
@@ -297,41 +297,10 @@ class MobileAuthService {
     }
 
     try {
-      debugPrint('Attempting to refresh session...');
+      debugPrint('🔄 Attempting to refresh session...');
 
-      // First try Supabase native refresh
-      try {
-        final refreshedSession = await SupabaseService()
-            .client
-            .auth
-            .refreshSession(_session!.refreshToken);
-
-        if (refreshedSession.session != null) {
-          debugPrint('✅ Supabase native refresh successful');
-          
-          // Update stored session
-          final prefs = await SharedPreferences.getInstance();
-          final sessionData = {
-            'access_token': refreshedSession.session!.accessToken,
-            'refresh_token': refreshedSession.session!.refreshToken,
-            'expires_in': refreshedSession.session!.expiresIn,
-            'expires_at': refreshedSession.session!.expiresAt,
-            'token_type': refreshedSession.session!.tokenType,
-            'user': refreshedSession.session!.user.toJson(),
-          };
-          
-          await prefs.setString(_sessionKey, jsonEncode(sessionData));
-          _session = refreshedSession.session;
-          
-          return true;
-        }
-      } catch (e) {
-        debugPrint('Supabase native refresh failed: $e');
-      }
-
-      // Fallback to custom refresh endpoint
       final response = await SupabaseService().client.functions.invoke(
-        'smart-function',
+        'mobile-auth',
         body: {
           'action': 'refresh-session',
           'user_id': _session!.user.id,
@@ -339,15 +308,13 @@ class MobileAuthService {
         },
       );
 
-      debugPrint('Custom refresh response: ${response.data}');
+      debugPrint('Refresh response: ${response.data}');
 
       if (response.status == 200 &&
           response.data is Map &&
           response.data['success'] == true) {
-        
         final data = response.data;
-        
-        // If refresh returns new tokens, update them
+
         if (data['accessToken'] != null && data['refreshToken'] != null) {
           final prefs = await SharedPreferences.getInstance();
           final sessionData = {
@@ -358,9 +325,9 @@ class MobileAuthService {
             'token_type': 'bearer',
             'user': _session!.user.toJson(),
           };
-          
+
           await prefs.setString(_sessionKey, jsonEncode(sessionData));
-          
+
           _session = Session(
             accessToken: data['accessToken'],
             refreshToken: data['refreshToken'],
@@ -368,17 +335,15 @@ class MobileAuthService {
             tokenType: 'bearer',
             user: _session!.user,
           );
-          
-          // Update Supabase client session
+
           try {
             await SupabaseService().client.auth.recoverSession(jsonEncode(sessionData));
-            debugPrint('✅ Updated Supabase session with refreshed tokens');
+            debugPrint('✅ Session refreshed successfully');
           } catch (e) {
             debugPrint('⚠️ Warning: Could not update Supabase session: $e');
           }
         }
-        
-        debugPrint('✅ Session refresh successful');
+
         return true;
       }
 
@@ -394,18 +359,15 @@ class MobileAuthService {
 
   /// Get device fingerprint for session tracking
   Future<String> _getDeviceFingerprint() async {
-    // Simple device fingerprint - you can enhance this
     return 'flutter_${DateTime.now().millisecondsSinceEpoch % 100000}';
   }
 
-  // Enhanced getters with better validation
+  // Getters
   bool get isAuthenticated {
     final hasLocalSession = _session != null && _currentUser != null;
     final hasSupabaseUser = SupabaseService().client.auth.currentUser != null;
     final hasSupabaseSession = SupabaseService().client.auth.currentSession != null;
-    
-    debugPrint('Auth Check - Local: $hasLocalSession, Supabase User: $hasSupabaseUser, Supabase Session: $hasSupabaseSession');
-    
+
     return hasLocalSession && hasSupabaseUser && hasSupabaseSession;
   }
 
@@ -418,121 +380,57 @@ class MobileAuthService {
   String? get userId => _currentUser?['id'];
   Session? get currentSession => _session;
 
-  /// Keep session alive by periodically refreshing
-  Future<void> keepSessionAlive() async {
-    if (!isAuthenticated) return;
-    
-    try {
-      // Try to refresh the session to keep it alive
-      final currentSession = SupabaseService().client.auth.currentSession;
-      if (currentSession != null && currentSession.refreshToken != null) {
-        await SupabaseService().client.auth.refreshSession(currentSession.refreshToken!);
-        debugPrint('Session refreshed to keep alive');
-      }
-    } catch (e) {
-      debugPrint('Keep alive refresh failed: $e');
-    }
-  }
+  /// Ensure valid session before making authenticated requests
   Future<bool> ensureValidSession() async {
     debugPrint('=== ENSURING VALID SESSION ===');
-    
+
     final currentUser = SupabaseService().client.auth.currentUser;
     final currentSession = SupabaseService().client.auth.currentSession;
-    
-    debugPrint('Current user exists: ${currentUser != null}');
-    debugPrint('Current session exists: ${currentSession != null}');
-    
+
     if (currentUser == null || currentSession == null) {
       debugPrint('No valid session, attempting refresh');
       return await refreshSession();
     }
-    
+
     // Check if token is close to expiry (refresh if less than 5 minutes left)
     if (currentSession.expiresAt != null) {
       final expiresAt = DateTime.fromMillisecondsSinceEpoch(currentSession.expiresAt! * 1000);
       final now = DateTime.now();
       final minutesUntilExpiry = expiresAt.difference(now).inMinutes;
-      
-      debugPrint('Token expires in $minutesUntilExpiry minutes');
-      
+
       if (minutesUntilExpiry < 5) {
         debugPrint('Token expires soon, refreshing');
         return await refreshSession();
       }
     }
-    
-    debugPrint('Session is valid');
+
+    debugPrint('✅ Session is valid');
     return true;
   }
 
-  /// Force session restoration (console logging only)
-  Future<bool> forceRestoreSession() async {
-    if (_session == null || _currentUser == null) {
-      debugPrint('No local session to restore');
-      return false;
-    }
-    
-    try {
-      debugPrint('Attempting session restoration...');
-      
-      // Method 1: Direct token setting
-      final sessionString = jsonEncode({
-        'access_token': _session!.accessToken,
-        'refresh_token': _session!.refreshToken,
-        'expires_in': 3600,
-        'token_type': 'bearer',
-        'user': _session!.user.toJson(),
-      });
-      
-      await SupabaseService().client.auth.recoverSession(sessionString);
-      
-      // Verify it worked
-      final user = SupabaseService().client.auth.currentUser;
-      if (user != null) {
-        debugPrint('Session restoration successful');
-        return true;
-      }
-      
-      debugPrint('Session restoration failed - no user after recovery');
-      return false;
-      
-    } catch (e) {
-      debugPrint('Session restoration error: $e');
-      return false;
-    }
-  }
+  /// Debug authentication state
   void debugAuthState() {
     final supabaseUser = SupabaseService().client.auth.currentUser;
     final supabaseSession = SupabaseService().client.auth.currentSession;
-    
-    debugPrint('=== DETAILED AUTH STATE DEBUG ===');
-    debugPrint('Local session exists: ${_session != null}');
-    debugPrint('Local user exists: ${_currentUser != null}');
+
+    debugPrint('=== AUTH STATE DEBUG ===');
+    debugPrint('Local session: ${_session != null}');
+    debugPrint('Local user: ${_currentUser != null}');
     debugPrint('Local user ID: ${_currentUser?['id']}');
-    debugPrint('Local access token: ${_session?.accessToken != null ? "EXISTS (${_session!.accessToken.length} chars)" : "NULL"}');
-    debugPrint('---');
-    debugPrint('Supabase user exists: ${supabaseUser != null}');
+    debugPrint('Supabase user: ${supabaseUser != null}');
     debugPrint('Supabase user ID: ${supabaseUser?.id}');
-    debugPrint('Supabase user email: ${supabaseUser?.email}');
-    debugPrint('Supabase user phone: ${supabaseUser?.phone}');
-    debugPrint('---');
-    debugPrint('Supabase session exists: ${supabaseSession != null}');
-    debugPrint('Supabase access token: ${supabaseSession?.accessToken != null ? "EXISTS (${supabaseSession!.accessToken.length} chars)" : "NULL"}');
-    debugPrint('Supabase token expires at: ${supabaseSession?.expiresAt}');
-    debugPrint('---');
+    debugPrint('Supabase session: ${supabaseSession != null}');
     debugPrint('isAuthenticated: $isAuthenticated');
-    debugPrint('isSupabaseAuthenticated: $isSupabaseAuthenticated');
-    debugPrint('Auth headers will use: ${supabaseSession?.accessToken != null ? "Bearer ${supabaseSession!.accessToken.substring(0, 20)}..." : "Anon key"}');
-    debugPrint('=================================');
+    debugPrint('========================');
   }
 
-  /// Get current access token for manual API calls
+  /// Get current access token
   String? get currentAccessToken {
     final supabaseSession = SupabaseService().client.auth.currentSession;
     return supabaseSession?.accessToken ?? _session?.accessToken;
   }
 
-  /// Enhanced logout with cleanup
+  /// Logout
   Future<void> logout() async {
     debugPrint('🚪 Logging out user...');
     await _clearSession();
@@ -557,21 +455,32 @@ class MobileAuthService {
 class OtpResponse {
   final bool success;
   final String message;
-  final String? otpForTesting;
-  OtpResponse({required this.success, required this.message, this.otpForTesting});
+  final String? sessionId;
+
+  OtpResponse({
+    required this.success,
+    required this.message,
+    this.sessionId,
+  });
 }
 
 class AuthResponse {
   final bool success;
   final Map<String, dynamic>? user;
   final String message;
-  AuthResponse({required this.success, this.user, required this.message});
+
+  AuthResponse({
+    required this.success,
+    this.user,
+    required this.message,
+  });
 }
 
 /// Custom exception
 class MobileAuthException implements Exception {
   final String message;
   MobileAuthException(this.message);
+
   @override
   String toString() => 'MobileAuthException: $message';
 }
