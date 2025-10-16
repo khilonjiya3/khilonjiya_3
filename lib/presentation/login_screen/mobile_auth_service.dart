@@ -50,6 +50,9 @@ class MobileAuthService {
 
         // Create session object from stored data
         final user = User.fromJson(sessionData['user']);
+        if (user == null) {
+          throw MobileAuthException('Failed to parse user data from stored session');
+        }
 
         _session = Session(
           accessToken: sessionData['access_token'],
@@ -146,6 +149,9 @@ class MobileAuthService {
 
     // Create Session object
     final user = User.fromJson(sessionData['user']);
+    if (user == null) {
+      throw MobileAuthException('Failed to parse user data from auth response');
+    }
 
     _session = Session(
       accessToken: authResponse['accessToken'],
@@ -406,6 +412,59 @@ class MobileAuthService {
 
     debugPrint('✅ Session is valid');
     return true;
+  }
+
+  /// Keep session alive by periodically refreshing
+  Future<void> keepSessionAlive() async {
+    if (!isAuthenticated) return;
+
+    try {
+      // Try to refresh the session to keep it alive
+      final currentSession = SupabaseService().client.auth.currentSession;
+      if (currentSession != null && currentSession.refreshToken != null) {
+        await SupabaseService().client.auth.refreshSession(currentSession.refreshToken!);
+        debugPrint('✅ Session refreshed to keep alive');
+      }
+    } catch (e) {
+      debugPrint('⚠️ Keep alive refresh failed: $e');
+    }
+  }
+
+  /// Force session restoration
+  Future<bool> forceRestoreSession() async {
+    if (_session == null || _currentUser == null) {
+      debugPrint('No local session to restore');
+      return false;
+    }
+
+    try {
+      debugPrint('🔄 Attempting session restoration...');
+
+      // Set session in Supabase client
+      final sessionString = jsonEncode({
+        'access_token': _session!.accessToken,
+        'refresh_token': _session!.refreshToken,
+        'expires_in': 3600,
+        'expires_at': _session!.expiresAt,
+        'token_type': 'bearer',
+        'user': _session!.user.toJson(),
+      });
+
+      await SupabaseService().client.auth.recoverSession(sessionString);
+
+      // Verify it worked
+      final user = SupabaseService().client.auth.currentUser;
+      if (user != null) {
+        debugPrint('✅ Session restoration successful');
+        return true;
+      }
+
+      debugPrint('❌ Session restoration failed - no user after recovery');
+      return false;
+    } catch (e) {
+      debugPrint('❌ Session restoration error: $e');
+      return false;
+    }
   }
 
   /// Debug authentication state
